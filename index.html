@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hydrocarbons</title>
+<style>
+:root{--bg1:#04070d;--bg2:#10213a;--fg:#eef4fc;--mut:#9db0ca;color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+body{margin:0;height:100%;overflow:hidden;background:linear-gradient(180deg,var(--bg1) 0%,var(--bg2) 100%);color:var(--fg);font-family:Georgia,"Iowan Old Style","Times New Roman",serif}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+.hero{position:fixed;left:0;right:0;top:14vh;padding:0 6vw;text-align:center;pointer-events:none}
+h1{margin:0;font-weight:400;font-size:clamp(2.6rem,9vw,6.5rem);letter-spacing:-.02em;line-height:1}
+p{margin:1rem auto 0;max-width:34ch;color:var(--mut);font-size:clamp(1rem,2.2vw,1.25rem);line-height:1.5}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hero">
+<h1>Hydrocarbons</h1>
+<p>Chains and rings of carbon and hydrogen, drifting above a crystal surface. Move your pointer through them.</p>
+</div>
+<script>
+(function(){
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+let W,H,DPR,wallTop,wallRows=[];
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const ptr={x:0,y:0,on:false};
+
+/* ---------- sprites (shaded spheres => 2.5D) ---------- */
+function sprite(c0,c1,c2){
+  const s=128,o=document.createElement('canvas');o.width=o.height=s;
+  const g=o.getContext('2d'),gr=g.createRadialGradient(s*.36,s*.32,s*.04,s*.5,s*.5,s*.5);
+  gr.addColorStop(0,c0);gr.addColorStop(.55,c1);gr.addColorStop(1,c2);
+  g.fillStyle=gr;g.beginPath();g.arc(s/2,s/2,s/2-1,0,7);g.fill();return o;
+}
+const SP={
+  C:sprite('#dbe3ee','#6f7d91','#222a37'),
+  H:sprite('#ffffff','#dce6f3','#8091a8'),
+  W:sprite('#d2f3ff','#3f9fd6','#0e3857')
+};
+
+/* ---------- molecule definitions ---------- */
+function finish(atoms){
+  const bonds=[];let ext=0;
+  atoms.forEach((a,i)=>{
+    ext=Math.max(ext,Math.hypot(...a.p)+.4);
+    for(let j=i+1;j<atoms.length;j++){
+      const b=atoms[j],d=Math.hypot(a.p[0]-b.p[0],a.p[1]-b.p[1],a.p[2]-b.p[2]);
+      if((a.e==='C'&&b.e==='C'&&d<1.7)||(a.e!==b.e&&d<1.3))bonds.push([i,j]);
+    }
+  });
+  return {atoms,bonds,ext};
+}
+function chain(n){
+  const a=[],c=[];
+  for(let i=0;i<n;i++){
+    const up=i%2?-1:1,x=(i-(n-1)/2)*1.25,y=up*.4;
+    c.push([x,y]);a.push({e:'C',p:[x,y,0]});
+    a.push({e:'H',p:[x,y+up*.55,.88]});a.push({e:'H',p:[x,y+up*.55,-.88]});
+  }
+  [[0,1],[n-1,n-2]].forEach(([i,j])=>{
+    const dx=c[i][0]-c[j][0],dy=c[i][1]-c[j][1],l=Math.hypot(dx,dy);
+    a.push({e:'H',p:[c[i][0]+dx/l*1.05,c[i][1]+dy/l*1.05,0]});
+  });
+  return finish(a);
+}
+function methane(){
+  const k=.63,a=[{e:'C',p:[0,0,0]}];
+  [[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]].forEach(v=>a.push({e:'H',p:v.map(t=>t*k)}));
+  return finish(a);
+}
+function benzene(){
+  const a=[];
+  for(let k=0;k<6;k++){
+    const t=k*Math.PI/3;
+    a.push({e:'C',p:[Math.cos(t)*1.35,Math.sin(t)*1.35,0]});
+    a.push({e:'H',p:[Math.cos(t)*2.4,Math.sin(t)*2.4,0]});
+  }
+  return finish(a);
+}
+const DEFS=[methane(),chain(2),chain(3),chain(4),benzene(),chain(5),methane(),benzene()];
+
+/* ---------- molecules ---------- */
+let mols=[];
+function makeMol(i){
+  const def=DEFS[i%DEFS.length],d=rnd(.75,1.25),u=rnd(17,25)*(W<600?.75:1);
+  return {atoms:def.atoms,bonds:def.bonds,ext:def.ext,u,d,
+    x:rnd(60,W-60),y:rnd(60,Math.max(100,wallTop-60)),
+    vx:rnd(-.8,.8),vy:rnd(-.8,.8),
+    rx:rnd(0,6.28),ry:rnd(0,6.28),rz:rnd(0,6.28),
+    bx:rnd(-.012,.012),by:rnd(-.012,.012),bz:rnd(-.008,.008),
+    wx:0,wy:0,wz:0,al:.55+.45*(d-.75)/.5};
+}
+const radius=m=>m.ext*m.u*m.d*.72;
+
+/* ---------- wall: dense hexagonal lattice, layered for depth ---------- */
+function buildWall(){
+  wallRows=[];
+  const base=Math.max(11,Math.min(18,W/60)),N=7;
+  const rows=[];let tot=0;
+  for(let r=0;r<N;r++){
+    const t=r/(N-1),rad=base*(.6+.6*t),step=rad*1.62;
+    rows.push({t,rad,step});tot+=step;
+  }
+  tot+=rows[N-1].rad*.4;
+  wallTop=H-tot;
+  let y=wallTop+rows[0].rad*.2;
+  rows.forEach((o,r)=>{
+    y+=o.step;
+    const sp=o.rad*1.96,off=r%2?sp/2:0,arr=[];
+    for(let x=-sp+off;x<W+sp;x+=sp)arr.push({x,y,rad:o.rad,t:o.t,ox:0,oy:0,vx:0,vy:0});
+    wallRows.push(arr);
+  });
+}
+function bump(x,s){
+  wallRows.forEach(rw=>rw.forEach(a=>{
+    const d=Math.abs(a.x-x);
+    if(d<80)a.vy+=s*(1-d/80)*(.5+.5*a.t);
+  }));
+}
+function stepWall(dt){
+  wallRows.forEach(rw=>{
+    for(let i=0;i<rw.length;i++){
+      const a=rw[i],l=rw[i-1]||a,r=rw[i+1]||a;
+      let ax=-.07*a.ox+.05*(l.ox+r.ox-2*a.ox),ay=-.07*a.oy+.05*(l.oy+r.oy-2*a.oy);
+      if(ptr.on){
+        const dx=a.x+a.ox-ptr.x,dy=a.y+a.oy-ptr.y,d=Math.hypot(dx,dy),R=130;
+        if(d<R&&d>.1){const f=Math.pow(1-d/R,2)*1.1;ax+=dx/d*f;ay+=dy/d*f;}
+      }
+      a.vx=(a.vx+(ax+rnd(-.012,.012))*dt)*.93;
+      a.vy=(a.vy+(ay+rnd(-.012,.012))*dt)*.93;
+    }
+    rw.forEach(a=>{a.ox+=a.vx*dt;a.oy+=a.vy*dt;});
+  });
+}
+function drawWall(){
+  wallRows.forEach(rw=>{
+    ctx.globalAlpha=.5+.5*rw[0].t;
+    rw.forEach(a=>{
+      const d=a.rad*2.06;
+      ctx.drawImage(SP.W,a.x+a.ox-d/2,a.y+a.oy-d/2,d,d);
+    });
+  });
+  ctx.globalAlpha=1;
+}
+
+/* ---------- physics ---------- */
+function step(dt){
+  const R=170;
+  for(const m of mols){
+    m.vx+=rnd(-.02,.02)*dt;m.vy+=rnd(-.02,.02)*dt;
+    if(ptr.on){
+      const dx=m.x-ptr.x,dy=m.y-ptr.y,d=Math.hypot(dx,dy);
+      if(d<R&&d>.1){
+        const f=Math.pow(1-d/R,2)*2.4*dt;
+        m.vx+=dx/d*f;m.vy+=dy/d*f;
+        m.wz+=(dx>0?1:-1)*f*.006;m.wy+=(dy>0?1:-1)*f*.006;
+      }
+    }
+    const v=Math.hypot(m.vx,m.vy);
+    if(v>7){m.vx*=7/v;m.vy*=7/v;}
+    if(v<.25){m.vx+=rnd(-.1,.1);m.vy+=rnd(-.1,.1);}
+    const k=Math.pow(.994,dt);m.vx*=k;m.vy*=k;
+    m.x+=m.vx*dt;m.y+=m.vy*dt;
+    m.wx+=(m.bx-m.wx)*.01*dt;m.wy+=(m.by-m.wy)*.01*dt;m.wz+=(m.bz-m.wz)*.01*dt;
+    m.rx+=m.wx*dt;m.ry+=m.wy*dt;m.rz+=m.wz*dt;
+    const r=radius(m);
+    if(m.x<r){m.x=r;m.vx=Math.abs(m.vx);}
+    if(m.x>W-r){m.x=W-r;m.vx=-Math.abs(m.vx);}
+    if(m.y<r){m.y=r;m.vy=Math.abs(m.vy);}
+    if(m.y>wallTop-r*.55){
+      m.y=wallTop-r*.55;
+      if(m.vy>0){bump(m.x,m.vy*.9);m.vy=-m.vy*.8;m.wz+=rnd(-.01,.01);}
+    }
+  }
+  for(let i=0;i<mols.length;i++)for(let j=i+1;j<mols.length;j++){
+    const a=mols[i],b=mols[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),s=radius(a)+radius(b);
+    if(d<s&&d>.01){
+      const nx=dx/d,ny=dy/d,o=(s-d)/2;
+      a.x-=nx*o;a.y-=ny*o;b.x+=nx*o;b.y+=ny*o;
+      const rel=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+      if(rel<0){a.vx+=nx*rel;a.vy+=ny*rel;b.vx-=nx*rel;b.vy-=ny*rel;a.wz+=rnd(-.01,.01);b.wz+=rnd(-.01,.01);}
+    }
+  }
+  stepWall(dt);
+}
+
+/* ---------- drawing ---------- */
+function drawMol(m){
+  const cx=Math.cos(m.rx),sx=Math.sin(m.rx),cy=Math.cos(m.ry),sy=Math.sin(m.ry),cz=Math.cos(m.rz),sz=Math.sin(m.rz),U=m.u*m.d;
+  const P=m.atoms.map(a=>{
+    const [x,y,z]=a.p,x1=x*cy+z*sy,z1=-x*sy+z*cy,y1=y*cx-z1*sx,z2=y*sx+z1*cx;
+    const x2=x1*cz-y1*sz,y2=x1*sz+y1*cz,k=14/(14-z2);
+    return {z:z2,x:m.x+x2*U*k,y:m.y+y2*U*k,r:(a.e==='C'?.55:.34)*U*k,e:a.e,k};
+  });
+  const items=P.map(p=>({z:p.z,p}));
+  m.bonds.forEach(([i,j])=>items.push({z:(P[i].z+P[j].z)/2,a:P[i],b:P[j]}));
+  items.sort((p,q)=>p.z-q.z);
+  ctx.globalAlpha=m.al;ctx.lineCap='round';
+  for(const it of items){
+    if(it.p){const p=it.p;ctx.drawImage(SP[p.e],p.x-p.r,p.y-p.r,p.r*2,p.r*2);}
+    else{
+      ctx.strokeStyle='rgba(176,192,214,.9)';ctx.lineWidth=.17*U*(it.a.k+it.b.k)/2;
+      ctx.beginPath();ctx.moveTo(it.a.x,it.a.y);ctx.lineTo(it.b.x,it.b.y);ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1;
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  if(ptr.on){
+    const g=ctx.createRadialGradient(ptr.x,ptr.y,0,ptr.x,ptr.y,170);
+    g.addColorStop(0,'rgba(120,190,255,.14)');g.addColorStop(1,'rgba(120,190,255,0)');
+    ctx.fillStyle=g;ctx.fillRect(ptr.x-170,ptr.y-170,340,340);
+  }
+  mols.slice().sort((a,b)=>a.d-b.d).forEach(drawMol);
+  drawWall();
+}
+
+/* ---------- setup ---------- */
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  W=window.innerWidth;H=window.innerHeight;
+  cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);
+  buildWall();
+  const n=Math.max(8,Math.min(20,Math.round(W*H/85000)));
+  if(!mols.length){for(let i=0;i<n;i++)mols.push(makeMol(i));}
+  else mols.forEach(m=>{m.x=Math.min(m.x,W-40);m.y=Math.min(m.y,wallTop-40);});
+}
+function setPtr(e){ptr.x=e.clientX;ptr.y=e.clientY;ptr.on=true;}
+window.addEventListener('pointermove',setPtr);
+window.addEventListener('pointerdown',setPtr);
+window.addEventListener('pointerup',e=>{if(e.pointerType!=='mouse')ptr.on=false;});
+window.addEventListener('pointercancel',()=>{ptr.on=false;});
+document.addEventListener('mouseleave',()=>{ptr.on=false;});
+window.addEventListener('resize',resize);
+resize();
+let last=performance.now();
+function loop(t){
+  const dt=Math.min(2.5,(t-last)/16.67);last=t;
+  step(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
